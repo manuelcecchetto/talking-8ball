@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+viewer/node_modules/
+viewer/package-lock.json
+
+# Waveshare's board model and drawings: download them (see README), don't redistribute
+vendor/
+out/asm_board.stl
+
+out/http.*
+out/check.log

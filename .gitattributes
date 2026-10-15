@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.stl -diff
+*.step -diff
+*.gcode -diff
+*.3mf binary

@@ -1,0 +1,331 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Talking 8-ball: reveal animation prototype</title>
+<style>
+  html, body { margin: 0; background: #0b0b0e; color: #9a9aa6; font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px 12px; }
+  .ball {
+    width: min(560px, 92vw); aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center;
+    background: radial-gradient(circle at 34% 28%, #45454d 0, #16161a 38%, #050506 70%);
+    box-shadow: 0 30px 70px #000c, inset -20px -30px 60px #000;
+  }
+  canvas {
+    width: 74%; aspect-ratio: 1; border-radius: 50%; cursor: pointer; touch-action: none;
+    box-shadow: 0 0 0 5px #030303, 0 0 0 7px #1d1d22;
+  }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  input { width: 260px; background: #17171c; border: 1px solid #2a2a33; color: #ddd; padding: 7px 9px; border-radius: 6px; }
+  button { background: #1d2a6b; border: 0; color: #dfe6ff; padding: 7px 12px; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #2a3a8f; }
+  .hint { text-align: center; max-width: 560px; }
+  kbd { background: #1b1b21; border: 1px solid #2c2c35; border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+  <div class="ball" id="ball"><canvas id="c"></canvas></div>
+  <div class="controls">
+    <input id="reply" placeholder="LLM reply (empty = random)" maxlength="60">
+    <button id="shake">Shake</button>
+  </div>
+  <div class="hint">
+    Hold the screen or <kbd>Space</kbd> = squeeze and talk · release = send · <kbd>S</kbd> = shake ·
+    move the mouse over the ball = tilt (the IMU)
+  </div>
+<script>
+const W = 466, R = W / 2;                          // 1.43"/1.75" round AMOLED panels are 466x466
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const dpr = Math.min(2, window.devicePixelRatio || 1);
+cv.width = cv.height = W * dpr; ctx.scale(dpr, dpr);
+
+const ANSWERS = ['THE ROAD KNOWS', 'NOT ON THIS EXIT', 'ASK THE DRIVER', 'YES. OBVIOUSLY.', 'SHIP IT',
+  'SLEEP ON IT', 'THE MAP IS NOT THE TERRITORY', 'YOU ALREADY KNOW', 'OUTLOOK: FOGGY', 'TURN AROUND'];
+
+// Triangle geometry (centroid at the origin, point up).
+const L = 300, H = L * Math.sqrt(3) / 2, TOP = -2 * H / 3, BOT = H / 3, TEXT_CY = H * 0.1;
+const widthAt = y => L * (y - TOP) / H;
+const font = s => `700 ${s}px "Futura", "Avenir Next Condensed", "Arial Narrow", "Segoe UI", sans-serif`;
+
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const easeIn = t => t * t * t;
+const rand = (a, b) => a + Math.random() * (b - a);
+
+// --- state ---------------------------------------------------------------
+let mode = 'idle';                 // idle | listening | thinking | reveal
+let churn = 1, level = 0, levelTarget = 0, lastLevel = 0;
+let tilt = { x: 0, y: 0 }, tiltTarget = { x: 0, y: 0 };
+let text = null, thinkTimer = 0;
+const tri = { mode: 'hidden', t: 0, rot: 0, rot0: 0, off0: { x: 0, y: 0 }, fade: 0, burst: false };
+
+const blobs = Array.from({ length: 7 }, () => ({
+  a: rand(0, 6.28), r: rand(40, 170), s: rand(-0.00035, 0.00035) || 0.0002, size: rand(120, 230), hue: rand(222, 250)
+}));
+const specks = Array.from({ length: 90 }, () => spawnSpeck());
+let bubbles = [];
+
+function spawnSpeck() {
+  const a = rand(0, 6.28), d = Math.sqrt(Math.random()) * R;
+  return { x: R + Math.cos(a) * d, y: R + Math.sin(a) * d, z: Math.random(), s: rand(0.6, 1.8) };
+}
+
+function layout(answer) {
+  const words = answer.toUpperCase().split(/\s+/).filter(Boolean);
+  for (let size = 38; size >= 12; size--) {
+    ctx.font = font(size);
+    const lh = size * 1.06;
+    for (let n = 1; n <= 5; n++) {
+      const top = TEXT_CY - lh * n / 2;
+      if (top < TOP + 70 || top + lh * n > BOT - 14) continue;
+      const lines = []; let i = 0;
+      for (let k = 0; k < n && i < words.length; k++) {
+        const maxW = widthAt(top + lh * k + size * 0.15) * 0.8;
+        let line = '';
+        while (i < words.length) {
+          const next = line ? line + ' ' + words[i] : words[i];
+          if (ctx.measureText(next).width <= maxW) { line = next; i++; } else break;
+        }
+        if (!line) break;
+        lines.push({ text: line, y: top + lh * k + lh / 2 });
+      }
+      if (i === words.length && lines.length === n) return { size, lines };
+    }
+  }
+  return { size: 12, lines: [{ text: answer.toUpperCase(), y: TEXT_CY }] };
+}
+
+// --- events --------------------------------------------------------------
+function squeeze() {
+  if (mode === 'listening') return;
+  mode = 'listening';
+  clearTimeout(thinkTimer);
+  if (tri.mode === 'rise' || tri.mode === 'up' || tri.mode === 'deep') sink(performance.now());
+}
+function release() {
+  if (mode !== 'listening') return;
+  think(rand(1100, 2000));          // stands in for speech-to-text + LLM latency
+}
+function shake() {
+  churn = 7;
+  clearTimeout(thinkTimer);
+  if (tri.mode === 'rise' || tri.mode === 'up') sink(performance.now());
+  think(1300);
+}
+function think(ms) {
+  mode = 'thinking';
+  const now = performance.now();
+  if (tri.mode !== 'sink') { tri.mode = 'deep'; tri.t = now; }
+  else tri.next = 'deep';
+  thinkTimer = setTimeout(() => reveal(document.getElementById('reply').value.trim()), ms);
+}
+function reveal(answer) {
+  text = layout(answer || ANSWERS[Math.floor(Math.random() * ANSWERS.length)]);
+  const now = performance.now();
+  // The triangle has 3-fold symmetry: settle to the nearest upright orientation.
+  const third = Math.PI * 2 / 3;
+  let r = ((tri.rot % third) + third) % third; if (r > third / 2) r -= third;
+  tri.rot0 = r;
+  tri.off0 = { x: Math.cos(now / 600) * 22, y: Math.sin(now / 520) * 16 };
+  tri.mode = 'rise'; tri.t = now; tri.burst = false; tri.next = null;
+  mode = 'reveal';
+}
+function sink(now) { tri.mode = 'sink'; tri.t = now; tri.next = null; }
+
+const ball = document.getElementById('ball');
+cv.addEventListener('pointerdown', e => { e.preventDefault(); squeeze(); });
+window.addEventListener('pointerup', release);
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.repeat) return;
+  if (e.code === 'Space') { e.preventDefault(); squeeze(); }
+  if (e.code === 'KeyS') shake();
+});
+window.addEventListener('keyup', e => { if (e.code === 'Space' && e.target.tagName !== 'INPUT') release(); });
+document.getElementById('shake').onclick = shake;
+ball.addEventListener('pointermove', e => {
+  const b = ball.getBoundingClientRect();
+  tiltTarget.x = clamp((e.clientX - b.left) / b.width * 2 - 1, -1, 1);
+  tiltTarget.y = clamp((e.clientY - b.top) / b.height * 2 - 1, -1, 1);
+});
+ball.addEventListener('pointerleave', () => { tiltTarget.x = tiltTarget.y = 0; });
+window.ball8 = { squeeze, release, shake, reveal: a => { clearTimeout(thinkTimer); reveal(a); } };
+
+// --- drawing -------------------------------------------------------------
+function drawLiquid(now, dt) {
+  const cx = R + tilt.x * 18, cy = R + tilt.y * 18;
+  const g = ctx.createRadialGradient(cx, cy, 10, R, R, R * 1.05);
+  g.addColorStop(0, '#0b1240'); g.addColorStop(0.55, '#050824'); g.addColorStop(1, '#010107');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, W);
+
+  ctx.globalCompositeOperation = 'lighter';
+  for (const b of blobs) {
+    b.a += b.s * dt * churn;
+    const x = R + Math.cos(b.a) * b.r + tilt.x * 30, y = R + Math.sin(b.a * 1.3) * b.r * 0.8 + tilt.y * 30;
+    const gg = ctx.createRadialGradient(x, y, 0, x, y, b.size);
+    gg.addColorStop(0, `hsla(${b.hue}, 85%, 32%, ${0.10 + 0.03 * (churn - 1)})`);
+    gg.addColorStop(1, 'hsla(240, 80%, 20%, 0)');
+    ctx.fillStyle = gg; ctx.fillRect(0, 0, W, W);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawSpecks(dt, front) {
+  for (const p of specks) {
+    if (!front) {
+      const k = 0.00045 * churn * dt;
+      const dx = p.x - R, dy = p.y - R;
+      p.x += -dy * k + tilt.x * 0.02 * dt * (1 - p.z);
+      p.y += dx * k - 0.004 * dt + tilt.y * 0.02 * dt * (1 - p.z);
+      if (Math.hypot(p.x - R, p.y - R) > R) Object.assign(p, spawnSpeck());
+    }
+    if ((p.z < 0.25) !== front) continue;
+    ctx.fillStyle = `rgba(150, 175, 255, ${0.12 + (1 - p.z) * 0.3})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.s * (1.4 - p.z), 0, 6.283); ctx.fill();
+  }
+}
+
+function drawListening(now) {
+  if (mode !== 'listening') return;
+  const glow = ctx.createRadialGradient(R, R, 0, R, R, 70 + level * 90);
+  glow.addColorStop(0, `rgba(90, 170, 255, ${0.25 + level * 0.35})`);
+  glow.addColorStop(1, 'rgba(60, 120, 255, 0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, W);
+  for (let i = 0; i < 4; i++) {
+    const p = (now / 900 + i / 4) % 1;
+    ctx.strokeStyle = `rgba(120, 190, 255, ${(1 - p) * (0.15 + level * 0.45)})`;
+    ctx.lineWidth = 1.5 + level * 3 * (1 - p);
+    ctx.beginPath(); ctx.arc(R, R, 20 + p * (R - 20), 0, 6.283); ctx.stroke();
+  }
+}
+
+function triParams(now, dt) {
+  const t = now - tri.t;
+  const swirl = { x: Math.cos(now / 600) * 22, y: Math.sin(now / 520) * 16 };
+  switch (tri.mode) {
+    case 'deep': {
+      tri.rot += dt * 0.0035 * churn;
+      const f = clamp(t / 600);
+      return { x: swirl.x, y: swirl.y, s: 0.3, rot: tri.rot, blur: 8, a: 0.55 * f, ta: 0, tblur: 0 };
+    }
+    case 'rise': {
+      const p = clamp(t / 1700), e = easeOut(p);
+      if (p > 0.42 && !tri.burst) { tri.burst = true; burst(); }
+      if (p >= 1) { tri.mode = 'up'; tri.t = now; }
+      const ta = clamp((p - 0.55) / 0.45);
+      return {
+        x: lerp(tri.off0.x, 0, e), y: lerp(tri.off0.y, 0, e),
+        s: lerp(0.3, 1, e) + 0.05 * Math.sin(p * Math.PI * 2.2) * (1 - p),
+        rot: tri.rot0 * (1 - e) + 0.16 * Math.sin(p * 17) * Math.pow(1 - p, 2),
+        blur: 8 * (1 - e), a: lerp(0.55, 1, e), ta, tblur: 5 * (1 - ta)
+      };
+    }
+    case 'up': {
+      if (t > 6500 && mode !== 'thinking') { sink(now); mode = 'idle'; }
+      return {
+        x: tilt.x * 10, y: Math.sin(t / 900) * 3 + tilt.y * 10, s: 1 + Math.sin(t / 1400) * 0.006,
+        rot: Math.sin(t / 1500) * 0.025 + tilt.x * 0.05, blur: 0, a: 1, ta: 1, tblur: 0
+      };
+    }
+    case 'sink': {
+      const q = clamp(t / 1000), e = easeIn(q);
+      if (q >= 1) {
+        tri.mode = tri.next || 'hidden'; tri.t = now; tri.next = null;
+        if (mode === 'reveal') mode = 'idle';
+      }
+      return { x: tilt.x * 10, y: 25 * e, s: lerp(1, 0.3, e), rot: 0.4 * e, blur: 12 * e, a: 1 - q, ta: 1 - clamp(q * 2), tblur: 4 * q };
+    }
+  }
+  return null;
+}
+
+function burst() {
+  for (let i = 0; i < 60; i++) {
+    bubbles.push({ x: R + rand(-150, 150), y: R + rand(-30, 110), r: rand(1.2, 5), vy: rand(0.04, 0.16), ph: rand(0, 6.28), life: rand(1200, 2600), age: 0 });
+  }
+}
+
+function drawBubbles(dt) {
+  bubbles = bubbles.filter(b => (b.age += dt) < b.life);
+  for (const b of bubbles) {
+    b.y -= b.vy * dt; b.x += Math.sin(b.age / 160 + b.ph) * 0.25 + tilt.x * 0.03 * dt;
+    const a = Math.sin(Math.PI * b.age / b.life) * 0.6;
+    ctx.strokeStyle = `rgba(170, 205, 255, ${a})`; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.283); ctx.stroke();
+    ctx.fillStyle = `rgba(230, 240, 255, ${a * 0.8})`;
+    ctx.beginPath(); ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.25, 0, 6.283); ctx.fill();
+  }
+}
+
+function trianglePath(scale = 1) {
+  ctx.beginPath();
+  ctx.moveTo(0, TOP * scale); ctx.lineTo(L / 2 * scale, BOT * scale); ctx.lineTo(-L / 2 * scale, BOT * scale);
+  ctx.closePath();
+}
+
+function drawTriangle(p) {
+  if (!p || p.a <= 0) return;
+  ctx.save();
+  ctx.translate(R + p.x, R + p.y); ctx.rotate(p.rot); ctx.scale(p.s, p.s);
+  ctx.globalAlpha = p.a;
+  ctx.filter = p.blur > 0.3 ? `blur(${p.blur}px)` : 'none';
+
+  ctx.shadowColor = 'rgba(50, 100, 255, 0.85)'; ctx.shadowBlur = 50;
+  const g = ctx.createLinearGradient(0, TOP, 0, BOT);
+  g.addColorStop(0, '#3653ff'); g.addColorStop(1, '#14249c');
+  ctx.fillStyle = g; trianglePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(150, 180, 255, 0.55)'; ctx.lineWidth = 3; trianglePath(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(10, 20, 90, 0.6)'; ctx.lineWidth = 2; trianglePath(0.9); ctx.stroke();
+
+  if (text && p.ta > 0) {
+    ctx.filter = (p.blur + p.tblur) > 0.3 ? `blur(${p.blur + p.tblur}px)` : 'none';
+    ctx.font = font(text.size); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.letterSpacing = '1px';
+    ctx.shadowColor = 'rgba(200, 220, 255, 0.7)'; ctx.shadowBlur = 8;
+    text.lines.forEach((l, i) => {
+      const la = clamp(p.ta * 1.6 - i * 0.25);           // lines ink in one after another
+      ctx.fillStyle = `rgba(238, 244, 255, ${la})`;
+      ctx.fillText(l.text, 0, l.y);
+    });
+  }
+  ctx.restore();
+}
+
+function drawGlass() {
+  const v = ctx.createRadialGradient(R, R, R * 0.55, R, R, R);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.85)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, W);
+  ctx.save();
+  ctx.translate(R * 0.72, R * 0.5); ctx.rotate(-0.6);
+  const h = ctx.createRadialGradient(0, 0, 0, 0, 0, 120);
+  h.addColorStop(0, 'rgba(255,255,255,0.10)'); h.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.scale(1.6, 0.55); ctx.fillStyle = h; ctx.beginPath(); ctx.arc(0, 0, 120, 0, 6.283); ctx.fill();
+  ctx.restore();
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(50, now - last); last = now;
+  tilt.x += (tiltTarget.x - tilt.x) * 0.06; tilt.y += (tiltTarget.y - tilt.y) * 0.06;
+  const churnTarget = { idle: 1, listening: 1.6, thinking: 4, reveal: 1.4 }[mode];
+  churn += (churnTarget - churn) * (churn > churnTarget ? 0.02 : 0.05);
+  if (mode === 'listening' && now - lastLevel > 90) { lastLevel = now; levelTarget = Math.random() < 0.2 ? 0.05 : rand(0.3, 1); }
+  level += ((mode === 'listening' ? levelTarget : 0) - level) * 0.25;
+
+  ctx.save();
+  ctx.beginPath(); ctx.arc(R, R, R, 0, 6.283); ctx.clip();
+  drawLiquid(now, dt);
+  drawSpecks(dt, false);
+  drawListening(now);
+  drawTriangle(triParams(now, dt));
+  drawBubbles(dt);
+  drawSpecks(dt, true);
+  drawGlass();
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

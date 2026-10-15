@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Talking 8-ball: assembly viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #16161b; color: #c9c9d3; font: 13px system-ui, sans-serif; overflow: hidden; }
+  #ui { position: absolute; top: 10px; left: 10px; background: #0d0d12cc; padding: 10px 12px; border-radius: 8px; display: grid; gap: 6px; }
+  label { display: flex; gap: 8px; align-items: center; }
+  input[type=range] { width: 160px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="ui">
+  <label>Explode <input id="explode" type="range" min="0" max="1" step="0.01" value="0"></label>
+  <label><input id="cut" type="checkbox"> Cutaway (half section)</label>
+  <label><input id="board" type="checkbox" checked> Board</label>
+  <label><input id="battery" type="checkbox" checked> Battery</label>
+  <span id="status">loading…</span>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+renderer.localClippingEnabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1b21);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 1, 2000);
+camera.up.set(0, 0, 1);
+camera.position.set(190, -230, 150);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 5);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xdfe6ff, 0x30303a, 1.2));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(150, -120, 250); scene.add(key);
+const rim = new THREE.DirectionalLight(0xffc890, 1.4); rim.position.set(-200, 150, 60); scene.add(rim);
+
+const clip = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);   // keeps the far half (y > 0)
+
+const PARTS = [
+  // file, color, roughness, explode offset (mm, along z), key
+  ['asm_front_half', 0x1d1d22, 0.55, 95, 'shell'],
+  ['asm_back_half', 0x1d1d22, 0.55, -55, 'shell'],
+  ['asm_eight_disc', 0xf4f2ea, 0.5, -85, 'shell'],
+  ['asm_eight_ink', 0x111111, 0.5, -85, 'shell'],
+  ['asm_chassis', 0xe8833a, 0.6, 18, 'chassis'],
+  ['asm_battery', 0xb8bcc6, 0.35, -8, 'battery'],
+  ['asm_board', 0x2a62c9, 0.45, 40, 'board'],
+];
+const meshes = {};
+const loader = new STLLoader();
+let loaded = 0;
+for (const [file, color, rough, off, keyName] of PARTS) {
+  loader.load(`../out/${file}.stl`, raw => {
+    const geo = file === 'asm_board' ? raw : toCreasedNormals(raw, Math.PI / 6);
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0.05, side: THREE.DoubleSide, clippingPlanes: [] });
+    const m = new THREE.Mesh(geo, mat);
+    m.userData = { off, keyName };
+    scene.add(m);
+    meshes[file] = m;
+    done();
+  }, undefined, done);   // asm_board.stl is only there after cad/ball.py ran with the vendor STEP
+}
+function done() {
+  if (++loaded === PARTS.length) { document.getElementById('status').textContent = 'drag to orbit, wheel to zoom'; apply(); window.ready = true; }
+}
+function apply() {
+  const e = +document.getElementById('explode').value;
+  const cut = document.getElementById('cut').checked;
+  for (const m of Object.values(meshes)) {
+    m.position.z = m.userData.off * e;
+    m.material.clippingPlanes = cut ? [clip] : [];
+    if (m.userData.keyName === 'board') m.visible = document.getElementById('board').checked;
+    if (m.userData.keyName === 'battery') m.visible = document.getElementById('battery').checked;
+  }
+}
+for (const id of ['explode', 'cut', 'board', 'battery']) document.getElementById(id).addEventListener('input', apply);
+window.view = (opts = {}) => {
+  if ('explode' in opts) document.getElementById('explode').value = opts.explode;
+  if ('cut' in opts) document.getElementById('cut').checked = opts.cut;
+  if ('board' in opts) document.getElementById('board').checked = opts.board;
+  if ('battery' in opts) document.getElementById('battery').checked = opts.battery;
+  if (opts.cam) { camera.position.set(...opts.cam); }
+  if (opts.target) { controls.target.set(...opts.target); }
+  controls.update(); apply();
+};
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+</script>
+</body>
+</html>
