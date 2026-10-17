@@ -5,7 +5,7 @@ as the 8-ball (cryptic, 2–7 words, in the language you asked in), and the answ
 ball's screen.
 
 ```
-ball ──WAV over Wi-Fi──▶ server.py ──▶ Whisper (GPU) ──▶ pi (RPC, claude-bridge/claude-haiku-5-5)
+ball ──WAV over Wi-Fi──▶ server.py ──▶ Whisper (GPU) ──▶ pi (RPC, claude-bridge/claude-sonnet-5-5)
      ◀──── {"answer": "..."} ──────────────────────────────────────┘
 ```
 
@@ -26,7 +26,9 @@ Options: `--model provider/id` (any model `pi --list-models` shows and your logi
 Requirements: [pi](https://pi.dev) installed and signed in (the server runs `pi --mode rpc`, so the
 answers use your existing pi login, no extra API key); Python 3.12 (or `uv`).
 
-Measured on an RTX 3090: about 0.5 s to transcribe, 1.5–2.5 s for pi to answer.
+Measured on an RTX 3090: about 0.5 s to transcribe, about 2 s for pi to answer. Answers that are too long or
+slip out of character (talk about prompts, systems, models) are refused and asked again once; if that
+fails too, the ball says "Ask again later".
 
 **Windows firewall:** the first time, Windows asks whether Python may accept connections. Allow
 **private networks**, otherwise the ball can't reach the PC.

@@ -36,7 +36,8 @@ Someone just shook you and asked a question out loud. Reply with ONE cryptic, or
 Like the real 8-ball, lean toward a verdict (yes, no, not yet, maybe) and wrap it in a short image
 or twist drawn from the question itself. Vary your imagery; avoid stock fog and mist.
 Tone: mysterious, playful, a little wry, never rude, never preachy.
-Answer in the language you are told. Output only the answer: no quotes, no emoji, no explanation,
+Answer in the language you are told, in correct, natural spelling. Write numbers as digits (42), never
+spelled out. Output only the answer: no quotes, no emoji, no explanation,
 no follow-up question, no final period.
 If the words are unclear or not a question, give a playful mysterious deflection.
 Never mention being an AI or a model."""
@@ -189,15 +190,31 @@ class Oracle:
                 raise
 
 
-def tidy(answer: str) -> str:
-    """One short line that fits the triangle."""
+MAX_WORDS = 9
+# The claude-bridge provider wraps our prompt in its own instructions; now and then the model talks
+# about those instead of answering. Such replies are refused and asked again.
+META = re.compile(r"(?i:\b(system|sistema|prompt|context|contesto|instruction|istruzion\w*|model|modello|"
+                  r"assistant|assistente|claude|anthropic|quarantin\w*|token)\b)"
+                  r"|\b(AI|IA)\b")              # case-sensitive: Italian "ai" is a preposition
+
+
+def clean(answer: str) -> str:
     line = next((l for l in answer.strip().splitlines() if l.strip()), "")
     line = re.sub(r"[*_`#]", "", line).strip().strip('"“”«»\'').strip()
-    words = line.split()
-    if len(words) > 9:
-        line = " ".join(words[:9])
-    line = re.sub(r"(?<!\.)\.$", "", line[:64].rstrip(" ,;:-"))   # keep "...", drop a lone period
-    return line
+    return re.sub(r"(?<!\.)\.$", "", line.rstrip(" ,;:-"))   # keep "...", drop a lone period
+
+
+def acceptable(line: str) -> bool:
+    return 0 < len(line.split()) <= MAX_WORDS and len(line) <= 64 and not META.search(line)
+
+
+def shorten(line: str) -> str | None:
+    """Last resort for a long answer: keep it up to a clause boundary, never mid-phrase."""
+    words = line.split()[:MAX_WORDS]
+    for i in range(len(words), 1, -1):
+        if re.search(r"[,;:.!?…]$", words[i - 1]):
+            return clean(" ".join(words[:i]))
+    return None
 
 
 # --- HTTP ---------------------------------------------------------------------------------
@@ -222,11 +239,22 @@ def allowed(request: web.Request) -> bool:
 
 
 async def answer(app, question: str, language: str) -> tuple[str, str]:
+    fallback = FALLBACK.get(language, FALLBACK["en"])
+    nudge = ""
     try:
-        return tidy(await app["oracle"].ask(question, language)), "pi"
+        for attempt in range(2):
+            raw = await app["oracle"].ask(question + nudge, language)
+            line = clean(raw)
+            if acceptable(line):
+                return line, "pi"
+            log.info("refused answer %r (attempt %d)", raw, attempt + 1)
+            nudge = ("\n(Your last reply was too long or not in character. Answer as the 8-ball only, "
+                     "at most 6 words.)")
+        short = shorten(line)
+        return (short, "pi") if short and not META.search(short) else (fallback, "fallback")
     except Exception as e:
         log.warning("pi failed: %s", e)
-        return FALLBACK.get(language, FALLBACK["en"]), "fallback"
+        return fallback, "fallback"
 
 
 async def ask(request: web.Request):
@@ -240,15 +268,19 @@ async def ask(request: web.Request):
         return web.json_response({"error": str(e) or "not a WAV file"}, status=400)
     question, language = await asyncio.to_thread(request.app["ears"].hear, pcm)
     t1 = time.perf_counter()
+    seconds = len(pcm) / SAMPLE_RATE
     if len(question) < 2:
+        # Whisper's language guess on silence is noise: answer in the language last spoken.
+        language = request.app["last_language"]
         result = {"question": "", "language": language, "answer": NO_SPEECH.get(language, NO_SPEECH["en"]),
                   "source": "no_speech"}
     else:
+        request.app["last_language"] = language
         reply, source = await answer(request.app, question, language)
         result = {"question": question, "language": language, "answer": reply, "source": source}
     t2 = time.perf_counter()
     result["ms"] = {"hear": round(1000 * (t1 - t0)), "think": round(1000 * (t2 - t1))}
-    log.info("%s | %r -> %r (%s ms)", language, question, result["answer"], result["ms"])
+    log.info("%s | %.1f s audio | %r -> %r (%s ms)", language, seconds, question, result["answer"], result["ms"])
     return web.json_response(result)
 
 
@@ -256,7 +288,10 @@ async def ask_text(request: web.Request):
     """Debug: skip the microphone. POST {"text": "...", "language": "it"}."""
     if not allowed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    body = await request.json()
+    try:
+        body = json.loads(await request.text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return web.json_response({"error": "body must be UTF-8 JSON"}, status=400)
     t0 = time.perf_counter()
     reply, source = await answer(request.app, str(body.get("text", ""))[:300], str(body.get("language", "en")))
     return web.json_response({"answer": reply, "source": source, "ms": {"think": round(1000 * (time.perf_counter() - t0))}})
@@ -311,7 +346,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--host", default="0.0.0.0", help="0.0.0.0 lets the ball reach it over Wi-Fi")
     p.add_argument("--port", type=int, default=8788)
-    p.add_argument("--model", default="claude-bridge/claude-haiku-5-5", help="pi model (provider/id)")
+    p.add_argument("--model", default="claude-bridge/claude-sonnet-5-5", help="pi model (provider/id)")
     p.add_argument("--whisper", default="large-v3-turbo")
     p.add_argument("--device", default="cuda", help="cuda or cpu")
     args = p.parse_args()
@@ -319,7 +354,7 @@ def main():
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
     app = web.Application(client_max_size=2 * MAX_AUDIO_SECONDS * SAMPLE_RATE + 4096)
-    app["token"], app["port"] = load_token(), args.port
+    app["token"], app["port"], app["last_language"] = load_token(), args.port, "it"
     log.info("loading Whisper %s on %s ...", args.whisper, args.device)
     app["ears"] = Ears(args.whisper, args.device)
     app["oracle"] = Oracle(args.model)
