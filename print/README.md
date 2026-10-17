@@ -1,5 +1,8 @@
 # Print job sheet: talking 8-ball
 
+**Bambu Lab A1 mini or P2S? Use [bambu/](bambu/README.md): sliced, ready-to-print projects for those
+printers.** The rest of this page is the PrusaSlicer version (and the general rules).
+
 Give this folder to whoever prints it (a print service, a friend, a maker space).
 Everything here was sliced and checked with PrusaSlicer 2.9.6 on a Prusa MK4S profile (bed 250 × 210).
 Any FDM printer with a bed of at least 120 × 120 mm and 60 mm height can print it; on a bed under

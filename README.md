@@ -28,7 +28,8 @@ The concept images are AI-generated; the CAD renders are the real model.
 | `cad/ball.py` | The whole mechanical design, parametric ([build123d](https://github.com/gumyr/build123d)) |
 | `cad/slice.py` | Packs the print jobs (3MF with settings and painted supports), slices them and checks the G-code |
 | `out/` | Generated STLs (print-oriented) and `assembly.step` |
-| `print/` | Print-ready jobs: [print/README.md](print/README.md) |
+| `print/` | Print-ready jobs: [print/README.md](print/README.md); Bambu A1 mini / P2S: [print/bambu/](print/bambu/README.md) |
+| `cad/slice_bambu.py` | Same for Bambu Studio: sliced `.gcode.3mf` projects per printer |
 | `viewer/index.html` | 3D viewer with explode and cutaway: run `python -m http.server` here, open `/viewer/` |
 | `reveal.html` | Screen animation prototype at the panel's 466×466; live with the mic when served by the server |
 | `server/` | The brain on your PC: Whisper + pi, and the ball's protocol: [server/README.md](server/README.md) |
