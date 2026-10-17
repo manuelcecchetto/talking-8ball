@@ -1,0 +1,7 @@
+aiohttp>=3.9
+numpy>=1.26
+faster-whisper>=1.2
+zeroconf>=0.130
+# NVIDIA GPU (CUDA 12) on Windows/Linux: Whisper runs on the GPU with these; without them it falls back to the CPU.
+nvidia-cublas-cu12; platform_machine == "AMD64" or platform_machine == "x86_64"
+nvidia-cudnn-cu12==9.*; platform_machine == "AMD64" or platform_machine == "x86_64"

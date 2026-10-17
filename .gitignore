@@ -9,3 +9,9 @@ out/asm_board.stl
 
 out/http.*
 out/check.log
+
+# server: local state
+server/.venv/
+server/config.json
+server/test.log
+server/test.pid

@@ -3,7 +3,11 @@
 A 100 mm black 8-ball with a round 1.75" AMOLED for a window. Shake it, ask out loud, and the answer
 (from an LLM on your PC) floats up on a blue triangle.
 
-**Status:** designed and checked in CAD and in the slicer. Not printed or assembled yet, no firmware yet.
+**Status:** shell designed and checked in CAD and in the slicer, not printed yet. The PC server works
+(voice → Whisper → pi → answer), testable in the browser with your microphone. Firmware: not yet.
+
+**Try it now, without the ball:** run `server\start.cmd`, open http://localhost:8788/, press **S** and
+ask out loud. See [server/README.md](server/README.md).
 
 | Concept | Exploded concept | CAD, exploded | CAD, cutaway |
 |---|---|---|---|
@@ -26,7 +30,8 @@ The concept images are AI-generated; the CAD renders are the real model.
 | `out/` | Generated STLs (print-oriented) and `assembly.step` |
 | `print/` | Print-ready jobs: [print/README.md](print/README.md) |
 | `viewer/index.html` | 3D viewer with explode and cutaway: run `python -m http.server` here, open `/viewer/` |
-| `reveal.html` | Screen animation prototype at the panel's 466×466 |
+| `reveal.html` | Screen animation prototype at the panel's 466×466; live with the mic when served by the server |
+| `server/` | The brain on your PC: Whisper + pi, and the ball's protocol: [server/README.md](server/README.md) |
 
 ### Regenerating
 

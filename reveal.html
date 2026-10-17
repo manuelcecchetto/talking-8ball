@@ -20,6 +20,7 @@
   button { background: #1d2a6b; border: 0; color: #dfe6ff; padding: 7px 12px; border-radius: 6px; cursor: pointer; }
   button:hover { background: #2a3a8f; }
   .hint { text-align: center; max-width: 560px; }
+  #status { min-height: 1.4em; text-align: center; max-width: 560px; color: #c3c8e6; }
   kbd { background: #1b1b21; border: 1px solid #2c2c35; border-radius: 4px; padding: 0 5px; }
 </style>
 </head>
@@ -29,10 +30,11 @@
     <input id="reply" placeholder="LLM reply (empty = random)" maxlength="60">
     <button id="shake">Shake</button>
   </div>
-  <div class="hint">
+  <div class="hint" id="hint">
     Hold the screen or <kbd>Space</kbd> = squeeze and talk · release = send · <kbd>S</kbd> = shake ·
     move the mouse over the ball = tilt (the IMU)
   </div>
+  <div id="status"></div>
 <script>
 const W = 466, R = W / 2;                          // 1.43"/1.75" round AMOLED panels are 466x466
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
@@ -98,16 +100,19 @@ function layout(answer) {
 
 // --- events --------------------------------------------------------------
 function squeeze() {
+  if (LIVE) return listen(false);
   if (mode === 'listening') return;
   mode = 'listening';
   clearTimeout(thinkTimer);
   if (tri.mode === 'rise' || tri.mode === 'up' || tri.mode === 'deep') sink(performance.now());
 }
 function release() {
+  if (LIVE) { if (mic.active && !mic.auto) finishListening(); return; }
   if (mode !== 'listening') return;
   think(rand(1100, 2000));          // stands in for speech-to-text + LLM latency
 }
 function shake() {
+  if (LIVE) { churn = 7; return listen(true); }
   churn = 7;
   clearTimeout(thinkTimer);
   if (tri.mode === 'rise' || tri.mode === 'up') sink(performance.now());
@@ -132,6 +137,121 @@ function reveal(answer) {
   mode = 'reveal';
 }
 function sink(now) { tri.mode = 'sink'; tri.t = now; tri.next = null; }
+
+// --- live mode: served by server/server.py, real microphone, real answers ---------
+// Mirrors the ball: shake -> listen until you stop talking -> WAV (16 kHz mono 16-bit) to /ask.
+// Holding Space or the screen is push-to-talk instead.
+const LIVE = location.protocol.startsWith('http');
+const status = document.getElementById('status');
+const mic = { stream: null, actx: null, active: false, auto: false, chunks: [], rate: 48000,
+              t0: 0, speech: false, quietSince: 0, floor: 0.01, floorN: 0 };
+const VAD = { calibrateMs: 250, endSilenceMs: 1100, noSpeechMs: 4500, maxMs: 9000 };
+
+function hideTriangle() {
+  clearTimeout(thinkTimer);
+  if (tri.mode === 'rise' || tri.mode === 'up' || tri.mode === 'deep') sink(performance.now());
+}
+
+async function listen(auto) {
+  if (mic.active || mode === 'thinking') return;
+  hideTriangle();
+  try {
+    if (!mic.stream) mic.stream = await navigator.mediaDevices.getUserMedia(
+      { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    if (!mic.actx) {
+      mic.actx = new AudioContext();
+      const node = mic.actx.createScriptProcessor(2048, 1, 1);
+      mic.actx.createMediaStreamSource(mic.stream).connect(node);
+      node.connect(mic.actx.destination);          // outputs silence; needed for onaudioprocess to run
+      node.onaudioprocess = onAudio;
+      mic.rate = mic.actx.sampleRate;
+    }
+    await mic.actx.resume();
+  } catch (e) {
+    status.textContent = 'Microphone unavailable: ' + e.message;
+    return;
+  }
+  Object.assign(mic, { active: true, auto, chunks: [], t0: performance.now(), speech: false, floor: 0.01, floorN: 0 });
+  mode = 'listening';
+  status.textContent = auto ? 'Listening… ask your question' : 'Listening… release to send';
+}
+
+function onAudio(e) {
+  if (!mic.active) return;
+  const d = e.inputBuffer.getChannelData(0);
+  mic.chunks.push(new Float32Array(d));
+  let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+  const rms = Math.sqrt(s / d.length), now = performance.now(), age = now - mic.t0;
+  levelTarget = Math.min(1, rms * 14);
+  if (!mic.auto) return;
+  if (age < VAD.calibrateMs) { mic.floor = (mic.floor * mic.floorN + rms) / ++mic.floorN; return; }
+  if (rms > Math.max(0.012, mic.floor * 2.5)) { mic.speech = true; mic.quietSince = now; }
+  if ((mic.speech && now - mic.quietSince > VAD.endSilenceMs) || (!mic.speech && age > VAD.noSpeechMs)
+      || age > VAD.maxMs) finishListening();
+}
+
+function toWav16k(chunks, rate) {
+  const n = chunks.reduce((a, c) => a + c.length, 0), all = new Float32Array(n);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = rate / 16000, out = new Int16Array(Math.floor(n / ratio));
+  for (let i = 0; i < out.length; i++) {         // box filter + decimate
+    const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+    let s = 0; for (let j = a; j < b; j++) s += all[j];
+    out[i] = Math.max(-1, Math.min(1, s / (b - a))) * 32767;
+  }
+  const buf = new ArrayBuffer(44 + out.length * 2), v = new DataView(buf);
+  const str = (p, t) => [...t].forEach((ch, i) => v.setUint8(p + i, ch.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + out.length * 2, true); str(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, out.length * 2, true);
+  new Int16Array(buf, 44).set(out);
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function finishListening() {
+  if (!mic.active) return;
+  mic.active = false; levelTarget = 0;
+  const wav = toWav16k(mic.chunks, mic.rate);
+  ask(fetch('/ask', { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav }));
+}
+
+function askText(q) {
+  hideTriangle(); churn = 7;
+  ask(fetch('/ask_text', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ text: q, language: /[àèéìòù]|\b(che|come|perché|il|la|di)\b/i.test(q) ? 'it' : 'en' }) }), q);
+}
+
+async function ask(request, typed) {
+  mode = 'thinking';
+  const now = performance.now();
+  if (tri.mode !== 'sink') { tri.mode = 'deep'; tri.t = now; } else tri.next = 'deep';
+  status.textContent = 'The liquid churns…';
+  const minWait = new Promise(r => setTimeout(r, 900));   // let the churn show even on a fast answer
+  try {
+    const res = await request, data = await res.json();
+    await minWait;
+    if (!res.ok) throw new Error(data.error || res.status);
+    reveal(data.answer);
+    const q = typed || data.question;
+    status.textContent = (q ? `“${q}”` : '(nothing heard)') + (data.language ? ` · ${data.language}` : '')
+      + ` · ${Object.entries(data.ms || {}).map(([k, v]) => `${k} ${v} ms`).join(' · ')}`
+      + (data.source === 'fallback' ? ' · pi failed, fallback answer' : '');
+  } catch (e) {
+    await minWait;
+    reveal('Ask again later');
+    status.textContent = 'Server error: ' + e.message;
+  }
+}
+
+if (LIVE) {
+  document.getElementById('hint').innerHTML = '<b>Live:</b> <kbd>S</kbd> or Shake = shake the ball, then ask out loud ' +
+    '(it stops when you stop talking) · hold <kbd>Space</kbd> or the screen = push-to-talk · or type a question + Enter';
+  const box = document.getElementById('reply');
+  box.placeholder = 'Type a question (skips the microphone)';
+  box.maxLength = 200;
+  box.addEventListener('keydown', e => { if (e.key === 'Enter' && box.value.trim()) { askText(box.value.trim()); box.value = ''; } });
+}
 
 const ball = document.getElementById('ball');
 cv.addEventListener('pointerdown', e => { e.preventDefault(); squeeze(); });
@@ -310,7 +430,7 @@ function frame(now) {
   tilt.x += (tiltTarget.x - tilt.x) * 0.06; tilt.y += (tiltTarget.y - tilt.y) * 0.06;
   const churnTarget = { idle: 1, listening: 1.6, thinking: 4, reveal: 1.4 }[mode];
   churn += (churnTarget - churn) * (churn > churnTarget ? 0.02 : 0.05);
-  if (mode === 'listening' && now - lastLevel > 90) { lastLevel = now; levelTarget = Math.random() < 0.2 ? 0.05 : rand(0.3, 1); }
+  if (!LIVE && mode === 'listening' && now - lastLevel > 90) { lastLevel = now; levelTarget = Math.random() < 0.2 ? 0.05 : rand(0.3, 1); }
   level += ((mode === 'listening' ? levelTarget : 0) - level) * 0.25;
 
   ctx.save();
