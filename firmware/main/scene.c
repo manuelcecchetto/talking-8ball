@@ -31,7 +31,9 @@ static const char *TAG = "scene";
 
 #define W 466
 #define R (W / 2)
-#define TRI_L 300.0f
+#define TRI_L 370.0f                // corners 214 px from the centre: the biggest that clears the rim
+#define K (TRI_L / 300.0f)          // the layout below was tuned at 300 px
+#define DEEP_S (90.0f / TRI_L)      // the die deep in the liquid is 90 px across
 #define TRI_H (TRI_L * 0.8660254f)
 #define TRI_TOP (-2.0f * TRI_H / 3.0f)
 #define TRI_BOT (TRI_H / 3.0f)
@@ -164,7 +166,7 @@ static struct {
     lv_draw_buf_t *buf_t, *buf_x;                       // LVGL renders the triangle into these
     uint8_t *half[2];                                   // its blur, at half resolution
     lv_obj_t *canvas;
-    lv_font_t *fonts[64];
+    lv_font_t *fonts[96];
     // panel
     esp_lcd_panel_handle_t panel;
     esp_lcd_touch_handle_t touch;
@@ -563,7 +565,7 @@ static lv_draw_buf_t *new_buf(int w, int h)
 
 static lv_font_t *font_px(int px)
 {
-    if (px < 8 || px >= 64) return NULL;
+    if (px < 8 || px >= 96) return NULL;
     if (!S.fonts[px]) S.fonts[px] = lv_tiny_ttf_create_data(font_ttf_start, font_ttf_end - font_ttf_start, px);
     return S.fonts[px];
 }
@@ -609,13 +611,13 @@ static bool layout_text(const char *text, layout_t *L)
         words[nw++][k] = 0;
     }
     if (!nw) return false;
-    for (int px = 56; px >= 16; px -= 2) {
+    for (int px = (int)(56 * K) & ~1; px >= 16; px -= 2) {
         lv_font_t *f = font_px(px);
         if (!f) continue;
         float lh = px * 0.98f;
         for (int n = 1; n <= 5; n++) {
             float top = TEXT_CY - lh * n / 2;
-            if (top < TRI_TOP + 70 || top + lh * n > TRI_BOT - 12) continue;
+            if (top < TRI_TOP + 70 * K || top + lh * n > TRI_BOT - 12 * K) continue;
             int i = 0, k;
             for (k = 0; k < n && i < nw; k++) {
                 float maxw = width_at(top + lh * k + px * 0.12f) * 0.8f;
@@ -802,7 +804,7 @@ static void burst(void)
 {
     for (int i = 0; i < N_BUBBLES; i++) {
         bubble_t *b = &S.bubbles[i];
-        float ox = frand(-140, 140), oy = frand(-20, 110), c = cosf(S.up), sn = sinf(S.up);   // below the centre
+        float ox = frand(-140, 140) * K, oy = frand(-20, 110) * K, c = cosf(S.up), sn = sinf(S.up);   // below the centre
         b->x = R + c * ox - sn * oy; b->y = R + sn * ox + c * oy; b->r = frand(2, 7);
         b->vy = frand(0.04f, 0.15f); b->ph = frand(0, 6.28f); b->life = frand(1200, 2600); b->age = frand(-300, 0); b->on = true;
     }
@@ -963,14 +965,14 @@ static void update(int64_t now)
     case TRI_HIDDEN: break;
     case TRI_DEEP:
         S.rot += dt * 0.0035f * S.churn;
-        x = sx; y = sy; s = 0.3f; rot = S.rot; ob = 0.55f * clampf(t / 600, 0, 1);
+        x = sx; y = sy; s = DEEP_S; rot = S.rot; ob = 0.55f * clampf(t / 600, 0, 1);
         break;
     case TRI_RISE: {
         float p = clampf(t / 1700, 0, 1), e = ease_out(p);
         if (p > 0.42f && !S.burst) { S.burst = true; burst(); }
         S.upx = roundf(S.tiltx * 10); S.upy = roundf(S.tilty * 10);   // ends where it will rest: no hop
         x = lerpf(S.offx0, S.upx, e); y = lerpf(S.offy0, S.upy, e);
-        s = lerpf(0.3f, 1, e) + 0.05f * sinf(p * 3.14159f * 2.2f) * (1 - p);
+        s = lerpf(DEEP_S, 1, e) + 0.05f * sinf(p * 3.14159f * 2.2f) * (1 - p);
         rot = S.up + S.rot0 * (1 - e) + 0.16f * sinf(p * 17) * (1 - p) * (1 - p);
         float a = lerpf(0.55f, 1, e);
         ob = a * lerpf(1, 0.6f, e); ot = a * e * e; ox = clampf((p - 0.55f) / 0.45f, 0, 1);
@@ -987,7 +989,8 @@ static void update(int64_t now)
         break;
     case TRI_SINK: {
         float q = clampf(t / 1000, 0, 1), e = ease_in(q);
-        x = S.upx - sa * 25 * e; y = S.upy + ca * 25 * e;   // from where it rested s = lerpf(1, 0.3f, e); rot = S.up + 0.4f * e;   // sinks down
+        x = S.upx - sa * 25 * e; y = S.upy + ca * 25 * e;   // sinks down from where it rested
+        s = lerpf(1, DEEP_S, e); rot = S.up + 0.4f * e;
         ob = lerpf(0.6f, 0.4f, q) * (1 - q * 0.6f); ot = 1 - q; ox = clampf(1 - 2 * q, 0, 1);
         if (q >= 1) { S.tri = S.tri_next; S.tri_t = now; if (S.mode == M_REVEAL) S.mode = M_IDLE; }
         break;
