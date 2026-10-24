@@ -18,6 +18,7 @@ volatile bool motion_log = false;
 
 #define HZ 100
 #define WINDOW 50                 // samples (0.5 s)
+#define UP_SIGN 1.0f              // the sensor's axes on the screen: flip if the answer comes out upside down
 #define SLICE_MS 100
 #define HOT_MG 1500.0f            // a slice is hot when the acceleration beyond gravity passes this
 #define HOT_SLICES 4              // hot slices in the last 10 (one second) that make a shake
@@ -42,8 +43,9 @@ static void motion_task(void *arg)
         sum += j - jerk[idx];
         jerk[idx] = j;
         idx = (idx + 1) % WINDOW;
-        lx += (x - lx) * 0.1f; ly += (y - ly) * 0.1f;
+        lx += (x - lx) * 0.2f; ly += (y - ly) * 0.2f;   // ~50 ms: the answer turns with the ball
         scene_set_tilt(-ly / 700.0f, lx / 700.0f);
+        scene_set_up(UP_SIGN * ly, -UP_SIGN * lx);   // at rest the sensor reads gravity's opposite: up
         if (sum > 2500) scene_agitate((sum - 2500) / 2500.0f);   // moving the ball stirs the liquid
         int64_t now = esp_timer_get_time() / 1000;
 
@@ -54,7 +56,8 @@ static void motion_task(void *arg)
         slice_end = now + SLICE_MS;
         hot = ((hot << 1) | (peak > HOT_MG)) & 0x3FF;
         int n = __builtin_popcount(hot);
-        if (motion_log) printf("imu %6lld ms  peak %5.0f mg  hot %d\n", now, peak, n);   // console: imu on
+        if (motion_log) printf("imu %6lld ms  peak %5.0f mg  hot %d  up %4.0f deg\n", now, peak, n,   // console: imu on
+                               atan2f(UP_SIGN * ly, UP_SIGN * lx) * 57.3f);
         peak = 0;
         if (n >= HOT_SLICES && now - last_shake > COOLDOWN_MS && samples > WINDOW + HZ) {   // start-up jolt left
             last_shake = now;

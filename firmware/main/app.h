@@ -23,6 +23,7 @@ void scene_think(void);               // the die tumbles deep in the liquid
 void scene_reveal(const char *answer);// render the triangle with this text and let it rise
 bool scene_busy(void);                // the triangle is on its way up or showing
 void scene_set_tilt(float x, float y);// -1..1 from the motion sensor
+void scene_set_up(float x, float y);  // which way is up across the screen, mg (x right, y down)
 void scene_agitate(float amount);     // shaking stirs the liquid
 void scene_wake(void);                // screen back on after idling
 void scene_snapshot_to_console(void); // debug: dump the screen as base64 RGB565

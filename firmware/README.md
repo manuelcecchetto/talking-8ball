@@ -66,6 +66,11 @@ screen every frame, in PSRAM buffers that the SPI driver then copied again.
   touches an item which hasn't been redrawn never shows it half moved.
 - The triangle and its text are rendered once per answer by LVGL off screen, packed, and flattened
   into a single layer for when it rests.
+- The answer stays level with real up (from the accelerometer, past a 5° dead zone), and bubbles
+  rise that way. While it turns it samples one pixel each (a bit jagged, 23–27 fps); once it stops
+  it is redrawn bilinear. A turned triangle is marked dirty as 16-row bands of its shape, not its
+  bounding box, which at an angle is nearly the whole screen. If it comes out upside down on another
+  board, flip `UP_SIGN` in `motion.c`.
 
 Measured with `fps on` (frames actually sent per second; 60 is the cap):
 
@@ -75,6 +80,7 @@ Measured with `fps on` (frames actually sent per second; 60 is the cap):
 | Listening | 28–30 |
 | Answer rising | 30–41 |
 | Answer resting | 58–60 |
+| Answer turning with the ball | 23–27 |
 
 Learned the hard way:
 

@@ -140,7 +140,7 @@ typedef struct { float a, r, s; int bx, by; int64_t t; rect_t box; } blob_t;
 typedef struct { bool on; float r, w; int opa; } ring_t;
 typedef struct { float x, y, r, vy, ph, life, age; bool on; bool drawn; float dx, dy; int opa; rect_t box; } bubble_t;
 typedef struct {                      // the triangle as last drawn
-    bool on, fast, flat;
+    bool on, fast, flat, smooth;          // smooth: settled, so worth sampling bilinear
     float cx, cy, s, rot, ic, is;
     int32_t du, dv;
     int ix, iy;
@@ -189,6 +189,7 @@ static struct {
     tri_mode_t tri, tri_next;
     int64_t tri_t, last, last_activity;
     float rot, rot0, offx0, offy0, churn, level, tiltx, tilty, tx, ty, agitation, upx, upy;
+    float up_target, up;                                // which way is up on the screen (0 = top), radians
     bool burst, dimmed;
 } S;
 
@@ -375,6 +376,30 @@ static inline void blend_tri(uint16_t *d, const tri_px_t *p, uint32_t ob, uint32
     *d = px;
 }
 
+// The flattened layer at (u, v) in 16.16 source pixels, bilinear: the resting triangle is turned to
+// stay level, and its text would look jagged sampled at single pixels. Colours are weighted by alpha.
+static inline void sample_flat(const tri_draw_t *T, int32_t u, int32_t v, uint16_t *d)
+{
+    int ui = u >> 16, vi = v >> 16, fu = (u >> 12) & 15, fv = (v >> 12) & 15;
+    if (ui < -1 || vi < -1 || ui >= TB_W || vi >= TB_H) return;
+    int wts[4] = {(16 - fu) * (16 - fv), fu * (16 - fv), (16 - fu) * fv, fu * fv};
+    int r = 0, g = 0, b = 0, A = 0;
+    for (int k = 0; k < 4; k++) {
+        int x = ui + (k & 1), y = vi + (k >> 1);
+        if (!wts[k] || (unsigned)x >= TB_W || (unsigned)y >= TB_H) continue;
+        int j = y * TB_W + x, wa = wts[k] * T->fa[j];
+        if (!wa) continue;
+        uint16_t c = T->fc[j];
+        r += (c >> 11) * wa; g += ((c >> 5) & 63) * wa; b += (c & 31) * wa; A += wa;
+    }
+    if (A < 256) return;
+    // r, g, b are premultiplied with A at 256 * 255 for opaque: out = colour + background * (1 - alpha).
+    uint16_t px = *d;
+    int ia = 65536 - A;
+    int R5 = (r + (px >> 11) * ia) >> 16, G6 = (g + ((px >> 5) & 63) * ia) >> 16, B5 = (b + (px & 31) * ia) >> 16;
+    *d = (uint16_t)((imin(R5, 31) << 11) | (imin(G6, 63) << 5) | imin(B5, 31));
+}
+
 static void draw_tri(rect_t c, uint16_t *dst, int w)
 {
     const tri_draw_t *T = &S.T;
@@ -383,7 +408,7 @@ static void draw_tri(rect_t c, uint16_t *dst, int w)
     for (int y = b.y1; y <= b.y2; y++) {
         uint16_t *d = dst + (y - c.y1) * w + (b.x1 - c.x1);
         int n = b.x2 - b.x1 + 1;
-        if (T->flat) {                                   // resting: one flattened layer, offset copy
+        if (T->flat && T->fast) {                        // resting upright: flattened layer, offset copy
             int vi = y - T->iy;
             if ((unsigned)vi >= TB_H) continue;
             const uint16_t *cr = T->fc + vi * TB_W;
@@ -399,6 +424,21 @@ static void draw_tri(rect_t c, uint16_t *dst, int w)
             for (int i = 0; i < n; i++) {
                 int ui = b.x1 + i - T->ix;
                 if ((unsigned)ui < TB_W) blend_tri(&d[i], &row[ui], T->ob, T->ot, T->ox);
+            }
+        } else if (T->flat) {                            // resting but turned: flattened layer
+            float ry = y + 0.5f - T->cy, rx = b.x1 + 0.5f - T->cx;
+            int32_t u = (int32_t)((PIVOT_X + T->ic * rx + T->is * ry) * 65536.0f);
+            int32_t v = (int32_t)((PIVOT_Y - T->is * rx + T->ic * ry) * 65536.0f);
+            if (T->smooth) {                             // bilinear once it stops turning
+                u -= 32768; v -= 32768;
+                for (int i = 0; i < n; i++, u += T->du, v += T->dv) sample_flat(T, u, v, &d[i]);
+            } else {                                     // one read per pixel while it turns
+                for (int i = 0; i < n; i++, u += T->du, v += T->dv) {
+                    int ui = u >> 16, vi = v >> 16;
+                    if ((unsigned)ui >= TB_W || (unsigned)vi >= TB_H) continue;
+                    int j = vi * TB_W + ui;
+                    if (T->fa[j]) d[i] = mix565(d[i], T->fc[j], (T->fa[j] + 4) >> 3);
+                }
             }
         } else {                                         // scaled and rotated: step through the source
             float ry = y + 0.5f - T->cy, rx = b.x1 + 0.5f - T->cx;
@@ -762,7 +802,8 @@ static void burst(void)
 {
     for (int i = 0; i < N_BUBBLES; i++) {
         bubble_t *b = &S.bubbles[i];
-        b->x = R + frand(-140, 140); b->y = R + frand(-20, 110); b->r = frand(2, 7);
+        float ox = frand(-140, 140), oy = frand(-20, 110), c = cosf(S.up), sn = sinf(S.up);   // below the centre
+        b->x = R + c * ox - sn * oy; b->y = R + sn * ox + c * oy; b->r = frand(2, 7);
         b->vy = frand(0.04f, 0.15f); b->ph = frand(0, 6.28f); b->life = frand(1200, 2600); b->age = frand(-300, 0); b->on = true;
     }
 }
@@ -778,6 +819,37 @@ static rect_t tri_box(float cx, float cy, float s, float rot)
     return rect_f(x1 - 1, y1 - 1, x2 + 1, y2 + 1);
 }
 
+// What the triangle covers on screen, glow included, as bands of 16 rows: turned, its bounding box
+// is most of the screen, the triangle itself about half of that. Each band is the triangle's extent
+// within the band grown by D on every side (the glow reaches MARGIN source pixels past the edges).
+static void damage_tri(const tri_draw_t *T)
+{
+    if (!T->on) return;
+    float c = cosf(T->rot) * T->s, sn = sinf(T->rot) * T->s, D = MARGIN * T->s + 2;
+    float rx[3] = {0, TRI_L / 2, -TRI_L / 2}, ry[3] = {TRI_TOP, TRI_BOT, TRI_BOT}, vx[3], vy[3];
+    float ymin = 1e9f, ymax = -1e9f;
+    for (int i = 0; i < 3; i++) {
+        vx[i] = T->cx + c * rx[i] - sn * ry[i]; vy[i] = T->cy + sn * rx[i] + c * ry[i];
+        ymin = fminf(ymin, vy[i]); ymax = fmaxf(ymax, vy[i]);
+    }
+    for (float y0 = floorf(ymin - D); y0 <= ymax + D; y0 += 16) {
+        float ya = y0 - D, yb = y0 + 16 + D, x1 = 1e9f, x2 = -1e9f;
+        for (int i = 0; i < 3; i++) {                   // vertices in the slab, and edges crossing its sides
+            int j = (i + 1) % 3;
+            if (vy[i] >= ya && vy[i] <= yb) { x1 = fminf(x1, vx[i]); x2 = fmaxf(x2, vx[i]); }
+            float dy = vy[j] - vy[i];
+            if (dy == 0) continue;
+            for (int k = 0; k < 2; k++) {
+                float t = ((k ? yb : ya) - vy[i]) / dy;
+                if (t < 0 || t > 1) continue;
+                float x = vx[i] + t * (vx[j] - vx[i]);
+                x1 = fminf(x1, x); x2 = fmaxf(x2, x);
+            }
+        }
+        if (x1 <= x2) damage(rect_f(x1 - D, y0, x2 + D, y0 + 15));
+    }
+}
+
 // Where the triangle should be now; redrawn only when that differs from what is on screen.
 static void place_tri(float x, float y, float s, float rot, float ob, float ot, float ox)
 {
@@ -789,18 +861,19 @@ static void place_tri(float x, float y, float s, float rot, float ob, float ot, 
     n.fast = fabsf(s - 1) < 0.004f && fabsf(rot) < 0.0035f;
     n.cx = R + x; n.cy = R + y; n.s = s; n.rot = rot;
     if (n.fast) { n.cx = roundf(n.cx); n.cy = roundf(n.cy); n.s = 1; n.rot = 0; }
-    n.flat = n.fast && S.tri == TRI_UP;
+    n.flat = S.tri == TRI_UP;
+    n.smooth = S.up == S.up_target;
     bool changed = n.on != T->on || (n.on && (n.src != T->src || n.ob != T->ob || n.ot != T->ot || n.ox != T->ox ||
-                   n.fast != T->fast || n.flat != T->flat || fabsf(n.cx - T->cx) >= 0.25f || fabsf(n.cy - T->cy) >= 0.25f ||
+                   n.fast != T->fast || n.flat != T->flat || n.smooth != T->smooth || fabsf(n.cx - T->cx) >= 0.25f || fabsf(n.cy - T->cy) >= 0.25f ||
                    fabsf(n.s - T->s) >= 0.002f || fabsf(n.rot - T->rot) >= 0.002f));
     if (!changed) return;
-    damage(T->box);
+    damage_tri(T);
     n.ic = cosf(n.rot) / n.s; n.is = sinf(n.rot) / n.s;
     n.du = (int32_t)(n.ic * 65536); n.dv = (int32_t)(-n.is * 65536);
     n.ix = (int)n.cx - PIVOT_X; n.iy = (int)n.cy - PIVOT_Y;
     n.box = n.on ? tri_box(n.cx, n.cy, n.s, n.rot) : NONE;
     *T = n;
-    damage(T->box);
+    damage_tri(T);
 }
 
 static void update(int64_t now)
@@ -809,6 +882,9 @@ static void update(int64_t now)
     S.last = now;
 
     S.tiltx += (S.tx - S.tiltx) * 0.08f; S.tilty += (S.ty - S.tilty) * 0.08f;
+    float du = remainderf(S.up_target - S.up, 6.2831853f);            // turn toward up, the short way
+    S.up = fabsf(du) < 0.003f ? S.up_target : remainderf(S.up + du * (1 - powf(0.75f, dt / 16)), 6.2831853f);
+    float sa = sinf(S.up), ca = cosf(S.up);                            // up is (sa, -ca) on screen
     float target = S.mode == M_LISTENING ? 1.6f : S.mode == M_THINKING ? 4.0f : S.mode == M_REVEAL ? 1.4f : 1.0f;
     target += S.agitation;
     S.agitation *= 0.94f;
@@ -836,7 +912,8 @@ static void update(int64_t now)
         speck_t *p = &S.specks[i];
         float k = 0.00045f * S.churn * dt, dx = p->x - R, dy = p->y - R;
         p->x += -dy * k + S.tiltx * 0.02f * dt * (1 - p->z);
-        p->y += dx * k - 0.004f * dt + S.tilty * 0.02f * dt * (1 - p->z);
+        p->x += sa * 0.004f * dt;                                         // drift up
+        p->y += dx * k - ca * 0.004f * dt + S.tilty * 0.02f * dt * (1 - p->z);
         if ((p->x - R) * (p->x - R) + (p->y - R) * (p->y - R) > (R - 6) * (R - 6)) spawn_speck(p);
         if (fabsf(p->x - p->dx) >= 0.25f || fabsf(p->y - p->dy) >= 0.25f) {
             damage(p->box);
@@ -893,7 +970,7 @@ static void update(int64_t now)
         if (p > 0.42f && !S.burst) { S.burst = true; burst(); }
         x = lerpf(S.offx0, 0, e); y = lerpf(S.offy0, 0, e);
         s = lerpf(0.3f, 1, e) + 0.05f * sinf(p * 3.14159f * 2.2f) * (1 - p);
-        rot = S.rot0 * (1 - e) + 0.16f * sinf(p * 17) * (1 - p) * (1 - p);
+        rot = S.up + S.rot0 * (1 - e) + 0.16f * sinf(p * 17) * (1 - p) * (1 - p);
         float a = lerpf(0.55f, 1, e);
         ob = a * lerpf(1, 0.6f, e); ot = a * e * e; ox = clampf((p - 0.55f) / 0.45f, 0, 1);
         if (p >= 1) { S.tri = TRI_UP; S.tri_t = now; S.upx = S.upy = 0; }
@@ -904,12 +981,12 @@ static void update(int64_t now)
         // Follows the tilt, but only past a pixel and a bit: each move redraws the whole triangle.
         if (fabsf(S.tiltx * 10 - S.upx) > 1.2f) S.upx = roundf(S.tiltx * 10);
         if (fabsf(S.tilty * 10 - S.upy) > 1.2f) S.upy = roundf(S.tilty * 10);
-        x = S.upx; y = S.upy;
+        x = S.upx; y = S.upy; rot = S.up;
         ob = 0.6f; ot = 1; ox = 1;
         break;
     case TRI_SINK: {
         float q = clampf(t / 1000, 0, 1), e = ease_in(q);
-        x = S.tiltx * 10; y = 25 * e; s = lerpf(1, 0.3f, e); rot = 0.4f * e;
+        x = S.tiltx * 10 - sa * 25 * e; y = ca * 25 * e; s = lerpf(1, 0.3f, e); rot = S.up + 0.4f * e;   // sinks down
         ob = lerpf(0.6f, 0.4f, q) * (1 - q * 0.6f); ot = 1 - q; ox = clampf(1 - 2 * q, 0, 1);
         if (q >= 1) { S.tri = S.tri_next; S.tri_t = now; if (S.mode == M_REVEAL) S.mode = M_IDLE; }
         break;
@@ -925,7 +1002,9 @@ static void update(int64_t now)
             b->age += dt;
             if (b->age > b->life) b->on = false;
             else if (b->age >= 0) {
-                b->y -= b->vy * dt; b->x += sinf(b->age / 160 + b->ph) * 0.25f + S.tiltx * 0.03f * dt;
+                float wob = sinf(b->age / 160 + b->ph) * 0.25f;          // rise up, wobble across
+                b->x += sa * b->vy * dt + ca * wob + S.tiltx * 0.03f * dt;
+                b->y += -ca * b->vy * dt + sa * wob;
                 show = true;
             }
         }
@@ -1116,7 +1195,7 @@ void scene_reveal(const char *answer)
     touch_activity();
     int64_t now = now_ms();
     const float third = 2.0943951f;
-    float r = fmodf(S.rot, third);
+    float r = fmodf(S.rot - S.up, third);           // the blank die's corner nearest to up
     if (r < 0) r += third;
     if (r > third / 2) r -= third;
     S.rot0 = r;
@@ -1130,6 +1209,15 @@ void scene_reveal(const char *answer)
 bool scene_busy(void) { return S.tri == TRI_RISE || S.tri == TRI_DEEP; }
 
 void scene_set_tilt(float x, float y) { S.tx = clampf(x, -1, 1); S.ty = clampf(y, -1, 1); }
+
+void scene_set_up(float x, float y)
+{
+    // Only when gravity lies enough across the screen (not lying face up), and past a few degrees:
+    // a hand is never still, and each turn redraws the whole triangle.
+    if (x * x + y * y < 400.0f * 400.0f) return;
+    float a = atan2f(x, -y), d = remainderf(a - S.up_target, 6.2831853f);
+    if (fabsf(d) > 0.09f) S.up_target = a;
+}
 
 void scene_agitate(float amount) { if (amount > S.agitation) S.agitation = clampf(amount, 0, 6); }
 
