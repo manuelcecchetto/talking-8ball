@@ -24,12 +24,22 @@ def open_port(port):
     return s
 
 
-def read_for(s, seconds, until=None):
+def read_for(s, seconds, until=None, echo=False):
+    """Reads for a while; with echo, prints as it goes, so a crash report before the board resets
+    (and the port disappears) is not lost."""
     end, buf = time.time() + seconds, b""
     while time.time() < end:
-        chunk = s.read(65536)
+        try:
+            chunk = s.read(65536)
+        except serial.SerialException:
+            if echo:
+                sys.stdout.write("\n[port gone: the board reset or switched off]\n")
+            break
         if chunk:
             buf += chunk
+            if echo:
+                sys.stdout.write(chunk.decode(errors="replace"))
+                sys.stdout.flush()
             if until and until in buf:
                 break
     return buf
@@ -72,16 +82,16 @@ def main():
     port, what = sys.argv[1], sys.argv[2]
     s = open_port(port)
     if what == "log":
-        sys.stdout.write(read_for(s, float(sys.argv[3]) if len(sys.argv) > 3 else 10).decode(errors="replace"))
+        read_for(s, float(sys.argv[3]) if len(sys.argv) > 3 else 10, echo=True)
     elif what == "reset":
         s.rts = True; time.sleep(0.1); s.rts = False       # EN pulse through the USB-JTAG bridge
         s.close(); time.sleep(1.5)
         s = open_port(port)
-        sys.stdout.write(read_for(s, float(sys.argv[3]) if len(sys.argv) > 3 else 8).decode(errors="replace"))
+        read_for(s, float(sys.argv[3]) if len(sys.argv) > 3 else 8, echo=True)
     elif what == "cmd":
         s.reset_input_buffer()
         s.write(sys.argv[3].encode() + b"\n")
-        sys.stdout.write(read_for(s, float(sys.argv[4]) if len(sys.argv) > 4 else 2).decode(errors="replace"))
+        read_for(s, float(sys.argv[4]) if len(sys.argv) > 4 else 2, echo=True)
     elif what == "snap":
         snap(s, sys.argv[3])
 

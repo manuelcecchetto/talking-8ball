@@ -1,5 +1,7 @@
 // QMI8658 motion sensor: tilt for the liquid, shaking to ask.
-// A shake is several sharp changes of acceleration within half a second; a single bump is not.
+// A shake is strong acceleration that keeps up: at least HOT_SLICES of the last ten 100 ms slices
+// peak over HOT_MG beyond gravity. Measured on the ball: shakes give 4-10 such slices a second;
+// picking it up, turning it, walking with it or putting it down never gave more than 1.
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,20 +18,25 @@ volatile bool motion_log = false;
 
 #define HZ 100
 #define WINDOW 50                 // samples (0.5 s)
-#define JERK_TRIGGER 9000.0f      // summed |Δa| in mg over the window
+#define SLICE_MS 100
+#define HOT_MG 1500.0f            // a slice is hot when the acceleration beyond gravity passes this
+#define HOT_SLICES 4              // hot slices in the last 10 (one second) that make a shake
 #define COOLDOWN_MS 2500
 
 static void motion_task(void *arg)
 {
     qmi8658_dev_t *dev = arg;
     float jerk[WINDOW] = {0}, sum = 0, lx = 0, ly = 0, px = 0, py = 0, pz = 1000;
+    float gx = 0, gy = 0, gz = 1000;               // gravity estimate
+    float peak = 0;                                // in the current slice
+    uint16_t hot = 0;                              // the last 10 slices, one bit each
     int idx = 0, samples = 0;
-    int64_t last_shake = 0, last_log = 0;
+    int64_t last_shake = 0, slice_end = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000 / HZ));
         float x, y, z;
         if (qmi8658_read_accel(dev, &x, &y, &z) != ESP_OK) continue;
-        if (samples++ == 0) { px = lx = x; py = ly = y; pz = z; }   // no jump from made-up values
+        if (samples++ == 0) { px = lx = gx = x; py = ly = gy = y; pz = gz = z; }   // no jump from made-up values
         float j = fabsf(x - px) + fabsf(y - py) + fabsf(z - pz);
         px = x; py = y; pz = z;
         sum += j - jerk[idx];
@@ -39,14 +46,21 @@ static void motion_task(void *arg)
         scene_set_tilt(-ly / 700.0f, lx / 700.0f);
         if (sum > 2500) scene_agitate((sum - 2500) / 2500.0f);   // moving the ball stirs the liquid
         int64_t now = esp_timer_get_time() / 1000;
-        if (sum > JERK_TRIGGER && now - last_shake > COOLDOWN_MS && samples > WINDOW + HZ) {   // start-up jolt left the window
+
+        gx += (x - gx) * 0.02f; gy += (y - gy) * 0.02f; gz += (z - gz) * 0.02f;
+        float dx = x - gx, dy = y - gy, dz = z - gz, m = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (m > peak) peak = m;
+        if (now < slice_end) continue;
+        slice_end = now + SLICE_MS;
+        hot = ((hot << 1) | (peak > HOT_MG)) & 0x3FF;
+        int n = __builtin_popcount(hot);
+        if (motion_log) printf("imu %6lld ms  peak %5.0f mg  hot %d\n", now, peak, n);   // console: imu on
+        peak = 0;
+        if (n >= HOT_SLICES && now - last_shake > COOLDOWN_MS && samples > WINDOW + HZ) {   // start-up jolt left
             last_shake = now;
-            ESP_LOGI(TAG, "shake (jerk %.0f mg)", sum);
+            hot = 0;
+            ESP_LOGI(TAG, "shake (%d of the last 10 slices over %.1f g)", n, HOT_MG / 1000);
             app_post_kind(EV_SHAKE);
-        }
-        if (motion_log && now - last_log > 200) {
-            last_log = now;
-            printf("imu x %6.0f y %6.0f z %6.0f  jerk %6.0f\n", x, y, z, sum);
         }
     }
 }
