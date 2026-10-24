@@ -968,12 +968,13 @@ static void update(int64_t now)
     case TRI_RISE: {
         float p = clampf(t / 1700, 0, 1), e = ease_out(p);
         if (p > 0.42f && !S.burst) { S.burst = true; burst(); }
-        x = lerpf(S.offx0, 0, e); y = lerpf(S.offy0, 0, e);
+        S.upx = roundf(S.tiltx * 10); S.upy = roundf(S.tilty * 10);   // ends where it will rest: no hop
+        x = lerpf(S.offx0, S.upx, e); y = lerpf(S.offy0, S.upy, e);
         s = lerpf(0.3f, 1, e) + 0.05f * sinf(p * 3.14159f * 2.2f) * (1 - p);
         rot = S.up + S.rot0 * (1 - e) + 0.16f * sinf(p * 17) * (1 - p) * (1 - p);
         float a = lerpf(0.55f, 1, e);
         ob = a * lerpf(1, 0.6f, e); ot = a * e * e; ox = clampf((p - 0.55f) / 0.45f, 0, 1);
-        if (p >= 1) { S.tri = TRI_UP; S.tri_t = now; S.upx = S.upy = 0; }
+        if (p >= 1) { S.tri = TRI_UP; S.tri_t = now; }
         break;
     }
     case TRI_UP:
@@ -986,7 +987,7 @@ static void update(int64_t now)
         break;
     case TRI_SINK: {
         float q = clampf(t / 1000, 0, 1), e = ease_in(q);
-        x = S.tiltx * 10 - sa * 25 * e; y = ca * 25 * e; s = lerpf(1, 0.3f, e); rot = S.up + 0.4f * e;   // sinks down
+        x = S.upx - sa * 25 * e; y = S.upy + ca * 25 * e;   // from where it rested s = lerpf(1, 0.3f, e); rot = S.up + 0.4f * e;   // sinks down
         ob = lerpf(0.6f, 0.4f, q) * (1 - q * 0.6f); ot = 1 - q; ox = clampf(1 - 2 * q, 0, 1);
         if (q >= 1) { S.tri = S.tri_next; S.tri_t = now; if (S.mode == M_REVEAL) S.mode = M_IDLE; }
         break;
